@@ -25,6 +25,10 @@ from craft import CRAFT
 from collections import OrderedDict
 
 import pandas as pd
+
+RESULT_FOLDER = './result/'
+
+
 def copyStateDict(state_dict):
     if list(state_dict.keys())[0].startswith("module"):
         start_idx = 1
@@ -55,7 +59,8 @@ def get_args():
     parser.add_argument('--refine', default=False, action='store_true', help='enable link refiner')
     parser.add_argument('--refiner_model', default='weights/craft_refiner_CTW1500.pth', type=str, help='pretrained refiner model')
     # add argument to cut image.
-    parser.add_argument('--rect_csv', default='../shift_mod_detector/src/detect_result/rect.csv', type=str, help='csv path')
+    parser.add_argument('--map_csv', default='../map/map.csv', type=str, help='mapping csv path')
+    # TODO add threshold to skip small rect
     
     args = parser.parse_args()
     return args
@@ -65,9 +70,9 @@ def prepare(args):
     """ For test images in a folder """
     image_list, _, _ = file_utils.get_files(args.test_folder)
     
-    result_folder = './result/'
-    if not os.path.isdir(result_folder):
-        os.mkdir(result_folder)
+
+    if not os.path.isdir(RESULT_FOLDER):
+        os.mkdir(RESULT_FOLDER)
     return image_list    
 
 
@@ -125,6 +130,11 @@ def test_net(net, image, text_threshold, link_threshold, low_text, cuda, poly, r
 def text_detect():
     args = get_args()
     image_list = prepare(args)
+    if not(os.path.isfile(args.map_csv)):
+        print('map csv is needed')
+        # TODO so system exit
+        return 1
+
     # load net
     net = CRAFT()     # initialize
 
@@ -158,19 +168,23 @@ def text_detect():
         args.poly = True
 
     t = time.time()
+    map_df = pd.read_csv(args.map_csv)
 
     # load data
-    for k, image_path in enumerate(image_list):
-        print("Test image {:d}/{:d}: {:s}".format(k+1, len(image_list), image_path), end='\r')
-        image = imgproc.loadImage(image_path)
+    for img_path, rect_csv_path in enumerate(image_list):
+        base_image = imgproc.loadImage(image_path)
+        rect_df = pd.read_csv(rect_csv_path)
+        del_index = []
+        for i, rect in enumerate(rect_df.values):
+            # RODO add if statement to skip small rect
+            x, y, width, height = rect
+            image = base_image[x:x+width, y:y+height]
 
-        bboxes, polys, score_text = test_net(net, image, args.text_threshold, args.link_threshold, args.low_text, args.cuda, args.poly, refine_net)
-
-        # save score text
-        filename, file_ext = os.path.splitext(os.path.basename(image_path))
-        mask_file = result_folder + "/res_" + filename + '_mask.jpg'
-        cv2.imwrite(mask_file, score_text)
-
-        file_utils.saveResult(image_path, image[:,:,::-1], polys, dirname=result_folder)
-
+            bboxes, polys, score_text = test_net(net, image, args.text_threshold, args.link_threshold, args.low_text, args.cuda, args.poly, refine_net)
+            if len(bboxes) == 0:
+                del_index.append(i)
+        del_index = list(set(del_index))
+        servive_index = list(set(rect_df.index.values.tolist()) - set(del_index))
+        rect_df = rect_df[rect_df.index.isin(servive_index)].reset_index(drop=True)
+        rect_df.to_csv(os.path.join(RESULT_FOLDER, rect_csv_path.replace('.csv', 'detece.csv')))
     print("elapsed time : {}s".format(time.time() - t))
